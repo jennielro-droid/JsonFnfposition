@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sprite JSON Positioner</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0a0a0d;color:#eee;font-family:Arial,sans-serif}
+header{padding:24px;text-align:center;border-bottom:1px solid #25252c;background:#101014}
+h1{margin:0;font-size:30px}.sub{color:#999;margin-top:7px}
+.wrap{max-width:1150px;margin:auto;padding:20px}.grid{display:grid;grid-template-columns:330px 1fr;gap:18px}
+.card{background:#121217;border:1px solid #292932;border-radius:16px;padding:18px;box-shadow:0 10px 30px #0005}
+label{display:block;font-size:13px;color:#aaa;margin:13px 0 7px}
+input[type=file],select,button{width:100%;padding:11px;border-radius:10px;border:1px solid #333;background:#1a1a21;color:#fff}
+button{cursor:pointer;font-weight:bold;margin-top:9px}button:hover{background:#25252d}
+.primary{background:#c92736;border-color:#e23a49}.primary:hover{background:#e23a49}
+.stage{height:650px;position:relative;overflow:hidden;border-radius:14px;background:
+linear-gradient(45deg,#17171d 25%,transparent 25%) 0 0/24px 24px,
+linear-gradient(-45deg,#17171d 25%,transparent 25%) 0 0/24px 24px,
+linear-gradient(45deg,transparent 75%,#17171d 75%) 0 0/24px 24px,
+linear-gradient(-45deg,transparent 75%,#17171d 75%) 0 0/24px 24px,#101014;
+display:flex;align-items:center;justify-content:center}
+canvas{max-width:100%;max-height:100%;image-rendering:pixelated}
+.row{display:flex;gap:8px}.row>*{flex:1}.info{font-size:13px;color:#aaa;line-height:1.5}
+#frames{max-height:180px;overflow:auto;margin-top:10px}.frame{padding:8px;border-radius:8px;background:#19191f;margin:5px 0;cursor:pointer}.frame.active{outline:2px solid #d52c3b}
+small{color:#777}
+@media(max-width:800px){.grid{grid-template-columns:1fr}.stage{height:500px}}
+</style>
+</head>
+<body>
+<header><h1>Sprite JSON Positioner</h1><div class="sub">FNF-style sprite sheet positioning & animation preview</div></header>
+<div class="wrap"><div class="grid">
+<section class="card">
+<label>Spritesheet PNG</label><input id="png" type="file" accept="image/png,image/*">
+<label>JSON / Atlas Data</label><input id="json" type="file" accept=".json,application/json">
+<label>Animation</label><select id="anim"><option>No JSON loaded</option></select>
+<div class="row">
+<button id="prev">◀</button><button id="play" class="primary">▶ Play</button><button id="next">▶</button>
+</div>
+<button id="download">Download Current Frame PNG</button>
+<button id="downloadAll">Download Frames + JSON ZIP</button>
+<p class="info" id="status">Upload a PNG and JSON to begin.</p>
+<div id="frames"></div>
+</section>
+<section class="card">
+<div class="stage"><canvas id="canvas"></canvas></div>
+</section>
+</div></div>
+<script>
+const pngInput=document.getElementById('png'),jsonInput=document.getElementById('json');
+const canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d');
+const animSel=document.getElementById('anim'),framesEl=document.getElementById('frames'),status=document.getElementById('status');
+let img=null,data=null,animations={},currentAnim='',index=0,timer=null;
+
+pngInput.onchange=e=>{
+ const f=e.target.files[0]; if(!f)return;
+ const im=new Image(); im.onload=()=>{img=im;draw();status.textContent=`PNG loaded: ${im.naturalWidth} × ${im.naturalHeight}`};
+ im.src=URL.createObjectURL(f);
+};
+jsonInput.onchange=async e=>{
+ try{data=JSON.parse(await e.target.files[0].text());parseJSON();}catch(err){status.textContent='Could not read that JSON.'}
+};
+
+function parseJSON(){
+ animations={};
+ // Supports common FNF/Psych-style and TexturePacker-like structures.
+ let raw=data.frames||data.animations||data;
+ if(raw.frames && !Array.isArray(raw.frames)) raw=raw.frames;
+ if(Array.isArray(raw)){
+   animations['default']=raw.map((f,i)=>normalize(f,i));
+ }else{
+   for(const [name,v] of Object.entries(raw||{})){
+     if(Array.isArray(v)) animations[name]=v.map((f,i)=>normalize(f,i));
+     else if(v && v.frames) animations[name]=(Array.isArray(v.frames)?v.frames:Object.values(v.frames)).map((f,i)=>normalize(f,i));
+     else if(v && v.frame) animations[name]=[normalize(v,0)];
+     else if(v && typeof v.x==='number') animations['default']=[normalize(v,0)];
+   }
+ }
+ if(!Object.keys(animations).length) {
+   const list=Object.values(data).filter(x=>x&&typeof x==='object'&&x.frame).map((x,i)=>normalize(x,i));
+   if(list.length)animations.default=list;
+ }
+ animSel.innerHTML='';
+ Object.keys(animations).forEach(k=>{let o=document.createElement('option');o.value=k;o.textContent=`${k} (${animations[k].length} frames)`;animSel.appendChild(o)});
+ currentAnim=Object.keys(animations)[0]||'';
+ index=0;renderFrameList();draw();
+ status.textContent=Object.keys(animations).length?`Loaded ${Object.keys(animations).length} animation(s).`:'JSON format not recognized.';
+}
+function normalize(f,i){
+ let a=f.frame||f;
+ return {x:+(a.x??0),y:+(a.y??0),w:+(a.w??a.width??0),h:+(a.h??a.height??0),
+   ox:+(f.offset?.x??f.offsetX??0),oy:+(f.offset?.y??f.offsetY??0),name:f.name||f.filename||`frame_${i}`};
+}
+animSel.onchange=()=>{currentAnim=animSel.value;index=0;renderFrameList();draw()};
+function frames(){return animations[currentAnim]||[]}
+function draw(){
+ if(!img||!frames().length)return;
+ let f=frames()[index],w=f.w,h=f.h;
+ if(!w||!h)return;
+ canvas.width=w;canvas.height=h;ctx.clearRect(0,0,w,h);
+ ctx.drawImage(img,f.x,f.y,w,h,0,0,w,h);
+}
+function renderFrameList(){
+ framesEl.innerHTML='';
+ frames().forEach((f,i)=>{let d=document.createElement('div');d.className='frame'+(i===index?' active':'');
+ d.textContent=`${i+1}. ${f.name} — x:${f.x} y:${f.y} ${f.w}×${f.h}`;
+ d.onclick=()=>{index=i;renderFrameList();draw()};framesEl.appendChild(d)});
+}
+function step(n){if(!frames().length)return;index=(index+n+frames().length)%frames().length;renderFrameList();draw()}
+prev.onclick=()=>step(-1);next.onclick=()=>step(1);
+play.onclick=()=>{if(timer){clearInterval(timer);timer=null;play.textContent='▶ Play'}else{timer=setInterval(()=>step(1),100);play.textContent='⏸ Pause'}};
+download.onclick=()=>{
+ if(!canvas.width){alert('Load a PNG and JSON first.');return}
+ canvas.toBlob(b=>{
+   if(!b)return;
+   const a=document.createElement('a');
+   const url=URL.createObjectURL(b);
+   a.href=url;
+   a.download=safeName(frames()[index]?.name||'frame')+'.png';
+   document.body.appendChild(a);a.click();a.remove();
+   setTimeout(()=>URL.revokeObjectURL(url),2000);
+ },'image/png');
+};
+downloadAll.onclick=async()=>{
+ if(!frames().length||!img){alert('Load a PNG and JSON first.');return}
+ try{
+   if(!window.JSZip) await loadZip();
+   const zip=new JSZip();
+   const outFrames=frames();
+   for(let i=0;i<outFrames.length;i++){
+     const f=outFrames[i];
+     if(!f.w||!f.h) continue;
+     const c=document.createElement('canvas'); c.width=f.w; c.height=f.h;
+     const cx=c.getContext('2d');
+     cx.clearRect(0,0,f.w,f.h);
+     cx.drawImage(img,f.x,f.y,f.w,f.h,0,0,f.w,f.h);
+     const blob=await new Promise(resolve=>c.toBlob(resolve,'image/png'));
+     if(blob) zip.file(`frames/${safeName(f.name||`frame_${i}`)}.png`,blob);
+   }
+   // Preserve the original JSON and also include a small manifest describing extracted frames.
+   const original = jsonInput.files[0] ? await jsonInput.files[0].text() : JSON.stringify(data,null,2);
+   zip.file('original.json',original);
+   zip.file('frame_manifest.json',JSON.stringify({
+     animation:currentAnim,
+     frames:outFrames.map((f,i)=>({index:i,name:f.name,x:f.x,y:f.y,width:f.w,height:f.h,offsetX:f.ox,offsetY:f.oy}))
+   },null,2));
+   const blob=await zip.generateAsync({type:'blob'});
+   const a=document.createElement('a');
+   a.href=URL.createObjectURL(blob);
+   a.download=`${safeName(currentAnim||'sprite')}_frames.zip`;
+   document.body.appendChild(a);a.click();a.remove();
+   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+ }catch(err){console.error(err);alert('ZIP creation failed: '+err.message)}
+};
+function safeName(name){return String(name).replace(/[<>:"/\\\\|?*\\x00-\\x1F]/g,'_').replace(/\\.png$/i,'')||'frame'}
+function loadZip(){return new Promise((res,rej)=>{let s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';s.onload=res;s.onerror=rej;document.head.appendChild(s)})}
+</script>
+</body>
+</html>
